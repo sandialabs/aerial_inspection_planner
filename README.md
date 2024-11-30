@@ -14,10 +14,14 @@ cd inspection_ws/src
 git clone <repo_address> (or copy the repo folder to here)
 ```
 
+## Prerequisites
+- Protobuf
+  - Ubuntu 22.04: `sudo apt install libprotobuf-dev protobuf-compiler`
+
 ## Using Docker
 If you would like to build and run everything in Docker, follow the instructions in `docker/notes.md`. Otherwise, the stack was built using Ubuntu 22.04 with ROS Humble. 
 
-## Building 
+## Building
 Navigate to the workspace directory and run
 ```sh
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
