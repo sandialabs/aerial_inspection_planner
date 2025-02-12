@@ -6,10 +6,6 @@
 #include "visualization_msgs/msg/marker.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/polygon.hpp"
-// #include "tsp_solvers/greedy.hpp"
-// #include "tsp_solvers/bnb.hpp"
-// #include "tsp_solvers/hill_climb.hpp"
-// #include "tsp_solvers/simulation_annealing.hpp"
 #include "aerial_inspection_planner/bvh.hpp"
 #include "tsp_solvers/ortools.hpp"
 

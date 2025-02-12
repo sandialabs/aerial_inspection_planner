@@ -105,10 +105,19 @@ visualization_msgs::msg::Marker InspectionPlanner::create_mesh_visualization_msg
 		if (color_as_redundancy)
 		{
 			int vp_count = mesh_to_vp_map[j].size();
-			double view_mixer = std::min(vp_count, (int) max_view_color)/max_view_color;
-			triangle_color.r = view_mixer;
-			triangle_color.g = 0;
-			triangle_color.b = 1 - view_mixer;
+			if (vp_count == 0)
+            {
+                triangle_color.r = 0;
+                triangle_color.g = 1;
+                triangle_color.b = 0;
+            }
+            else
+            {
+                double view_mixer = std::min(vp_count, (int) max_view_color)/max_view_color;
+                triangle_color.r = view_mixer;
+                triangle_color.g = 0;
+                triangle_color.b = 1 - view_mixer;
+            }
 			triangle_color2 = triangle_color;
 			triangle_color3 = triangle_color;
 		}
@@ -273,52 +282,73 @@ visualization_msgs::msg::MarkerArray InspectionPlanner::create_vps_visualization
 
 void InspectionPlanner::determine_visibility(bool save_mesh_to_vp_map = true)
 {
-	RCLCPP_INFO(this->get_logger(), "Calculating visibility for vps");
-	auto start_time = this->now();
-	// Resize the vectors before filling for faster execution
+    RCLCPP_INFO(this->get_logger(), "Calculating visibility for vps");
+    auto start_time = this->now();
+    // Resize the vectors before filling for faster execution
     mesh_to_vp_map.resize(mesh->size());
-	vp_to_mesh_map.resize(vp_positions.size());
+    vp_to_mesh_map.resize(vp_positions.size());
 
     // Determine visibility
     for (size_t i = 0; i < vp_positions.size(); ++i) // Viewpoints
-	{
+    {
         const auto& vp_pose = vp_positions[i];
-		const auto& vp_orient = vp_orientation_vec[i];
-		// TODO Or already computed below? Just need to evaluate? Just look at all visible meshes and make sure they don't occlude each other?
-		// actually still more complex. Need to look at all triangles, not just those passing the test
+        const auto& vp_orient = vp_orientation_vec[i];
+        // bool no_meshes_visible = true;
+        // TODO Or already computed below? Just need to evaluate? Just look at all visible meshes and make sure they don't occlude each other?
+        // actually still more complex. Need to look at all triangles, not just those passing the test
+        // TODO triangles can be viewed even if the ray from vp to mesh passes through other meshes 
         for (size_t j = 0; j < mesh->size(); ++j) // Mesh triangles
-		{
+        {
             const mesh_utils::Triangle& triangle = (*mesh)[j];
-			bool all_corners_visible = true;
-			for (size_t k = 0; k < triangle.vertices.size(); ++k) // Check all three corners
-			{
-				Eigen::Vector3f ray_direction(triangle.vertices[k] - vp_pose);
-				ray_direction.normalize();
-				if (!mesh_utils::ray_views_point(vp_pose, vp_orient, ray_direction, mesh_surface_normals[j],
-									triangle.vertices[k], max_incidence_angle_, max_view_distance_,
-									camera_half_fov_))
-				{
-					all_corners_visible = false;
-					break;
-				}
-			}
+            bool all_corners_visible = true;
+            for (size_t k = 0; k < triangle.vertices.size(); ++k) // Check all three corners
+            {
+                Eigen::Vector3f ray_direction(triangle.vertices[k] - vp_pose);
+                ray_direction.normalize();
+                if (!mesh_utils::ray_views_point(vp_pose, vp_orient, ray_direction, mesh_surface_normals[j],
+                                    triangle.vertices[k], max_incidence_angle_, max_view_distance_,
+                                    camera_half_fov_))
+                {
+                    all_corners_visible = false;
+                    break;
+                }
+            }
+            if (all_corners_visible) // Check if the segment from the viewpoint to the vertex intersects any other triangle
+            {
+                for (size_t k = 0; k < triangle.vertices.size(); ++k) // Check all three corners
+                {   
+                    for (size_t l = 0; l < mesh->size(); ++l) {
+                        if (l == j) continue; // Skip the current triangle
+                        // const mesh_utils::Triangle& other_triangle = (*mesh)[l]
+                        if (mesh_utils::segment_intersects_triangle(vp_pose, triangle.vertices[k], (*mesh)[l])) {
+                            all_corners_visible = false;
+                            goto exitloops;
+                        }
+                    }
+                }
+            }
+            exitloops:
             if (all_corners_visible)
-			{
-				if (save_mesh_to_vp_map)
-				{
-					mesh_to_vp_map[j].push_back(i);
-				}
-				vp_to_mesh_map[i].push_back(j);
-			}
-        }
+            {
+                // no_meshes_visible = false;
+                if (save_mesh_to_vp_map)
+                {
+                    mesh_to_vp_map[j].push_back(i);
+                }
+                vp_to_mesh_map[i].push_back(j);
+            }
+        } 
     }
-	RCLCPP_INFO_STREAM(this->get_logger(), "Time to calc visibility: " << this->now().seconds() - start_time.seconds()); 
+    RCLCPP_INFO_STREAM(this->get_logger(), "Time to calc visibility: " << this->now().seconds() - start_time.seconds()); 
 }
+
 
 bool InspectionPlanner::create_vps_for_all_triangles()
 {
 	RCLCPP_INFO(this->get_logger(), "**Creating all vps**");
 	int in_collision_count = 0;
+    int inside_mesh_count = 0;
+    int occlusions_count = 0;
 	for (std::vector<mesh_utils::Triangle>::iterator it = mesh->begin(); it != mesh->end(); it++)
 	{
 		int polygon_size = it->vertices.size();
@@ -337,28 +367,69 @@ bool InspectionPlanner::create_vps_for_all_triangles()
 		Eigen::Vector3f surface_normal = mesh_utils::calculate_surface_normal(v0, v1, v2);
 		mesh_surface_normals.push_back(surface_normal);
 		Eigen::Vector3f centroid = mesh_utils::calculate_centroid(v0, v1, v2);
+        Eigen::Vector3f new_vp;
+        for (int i = 0; i<2; i++)
+        {
+            surface_normal = (1-2*i)*surface_normal;
+            // Find viewpoint out from mesh, set the viewing angle as opposite of the normal.
+            new_vp = centroid + surface_normal*distance_from_surface_;
 
-		// Find viewpoint out from mesh, set the viewing angle as opposite of the normal.
-		Eigen::Vector3f new_vp = centroid + surface_normal*distance_from_surface_;
+            // Check for collisions
+            // TODO adjust vp if in collision. 
+            if (is_collision(new_vp))
+            {
+                in_collision_count++;
+                continue;
+            }
 
-		// Check for collisions
-		// TODO adjust vp if in collision. 
-		if (is_collision(new_vp))
-		{
-			in_collision_count++;
-			continue;
-		}
+            ///////////////// check for occlusions
+            // TODO adjust vp if occluded
+            bool all_corners_visible = true;
+            for (size_t k = 0; k < it->vertices.size(); ++k) // Check all three corners
+            {   
+                for (size_t l = 0; l < mesh->size(); ++l) {
+                    if (l == static_cast<size_t>(std::distance(mesh->begin(), it))) continue; // Skip the current triangle
+                    // const mesh_utils::Triangle& other_triangle = (*mesh)[l]
+                    if (mesh_utils::segment_intersects_triangle(new_vp, it->vertices[k], (*mesh)[l])) {
+                        all_corners_visible = false;
+                        goto exitloops;
+                    }
+                }
+            }
+            exitloops:
+            if (!all_corners_visible)
+            {
+                occlusions_count++;
+                continue;
+            }
 
-		// TODO check for visibility of the mesh it cares about
+            ////////////////////// check for inside mesh
+            if (mesh_utils::is_point_inside_mesh(new_vp, surface_normal, *mesh))
+            {
+                inside_mesh_count++;
+                continue;
+            }
 
-		vp_positions.push_back(new_vp);
-		vp_orientation_vec.push_back(-surface_normal); // pointing to surface normal, so negative
+            vp_positions.push_back(new_vp);
+            vp_orientation_vec.push_back(-surface_normal); // pointing to surface normal, so negative
+        }
+
 	}
 	vp_keep.resize(vp_positions.size(), true);
 	if (in_collision_count > 0)
 	{
 		RCLCPP_WARN_STREAM(this->get_logger(), "Didn't create " 
-			<< in_collision_count << " vps because of collisions\n");
+			<< in_collision_count << " vps because of collisions");
+	}
+    if (occlusions_count > 0)
+	{
+		RCLCPP_WARN_STREAM(this->get_logger(), "Didn't create " 
+			<< occlusions_count << " vps because of occlusions");
+	}
+    if (inside_mesh_count > 0)
+	{
+		RCLCPP_WARN_STREAM(this->get_logger(), "Didn't create " 
+			<< inside_mesh_count << " vps because inside mesh");
 	}
 	return true;
 }
@@ -388,6 +459,18 @@ bool InspectionPlanner::mesh_to_iterative_vps()
 
 	// Calculate visibility and view redundancy for each surface.
 	determine_visibility();
+
+    // check how many meshes can't be seen
+    int mesh_not_seen_count = 0;
+    for (size_t j = 0; j < mesh->size(); ++j)
+	{
+        int vp_count = mesh_to_vp_map[j].size();
+        if (vp_count == 0)
+        {
+            mesh_not_seen_count++;
+        }
+    }
+    RCLCPP_WARN(this->get_logger(), "%d Meshes not seen by view points before reduction", mesh_not_seen_count);
 
 	// Visualize with redundancy as color. 
 	if (this->visualize_mesh_)
@@ -454,6 +537,18 @@ bool InspectionPlanner::mesh_to_iterative_vps()
 		<< " -> " 
 		<< vp_positions.size() - count_removed);
 
+    // check how many meshes can't be seen
+    mesh_not_seen_count = 0;
+    for (size_t j = 0; j < mesh->size(); ++j)
+	{
+        int vp_count = mesh_to_vp_map[j].size();
+        if (vp_count == 0)
+        {
+            mesh_not_seen_count++;
+        }
+    }
+    RCLCPP_WARN(this->get_logger(), "%d Meshes not seen by view points after reduction", mesh_not_seen_count);
+
 	// Visualize the updates after trimming
 	if (this->visualize_mesh_)
 	{
@@ -493,7 +588,21 @@ bool InspectionPlanner::mesh_to_greedy_vps()
 	}
 
 	// Calculate visibility and view redundancy for each surface.
-	determine_visibility(false);
+	determine_visibility(true);
+        
+    // check how many meshes can't be seen
+    int mesh_not_seen_count = 0;
+    for (size_t j = 0; j < mesh->size(); ++j)
+	{
+        int vp_count = mesh_to_vp_map[j].size();
+        if (vp_count == 0)
+        {
+            mesh_not_seen_count++;
+        }
+	}
+    mesh_to_vp_map.clear();
+    mesh_to_vp_map.resize(mesh->size());
+    RCLCPP_WARN(this->get_logger(), "%d Meshes not seen by view points before reduction", mesh_not_seen_count);
 
 	// Visualize with redundancy as color. 
 	if (this->visualize_mesh_)
@@ -540,70 +649,66 @@ bool InspectionPlanner::mesh_to_greedy_vps()
 
 	RCLCPP_INFO_STREAM(this->get_logger(), "High vp index and value: " << vp_to_value_pair.front().first << ", " << vp_to_value_pair.front().second);
 	RCLCPP_INFO_STREAM(this->get_logger(), "Low vp index and value: " << vp_to_value_pair.back().first << ", " << vp_to_value_pair.back().second);
+    
+    // Make copies of the maps
+    auto vp_to_mesh_map_copy = vp_to_mesh_map;
+    auto mesh_to_vp_map_copy = mesh_to_vp_map;
+        
+    // Initialize true maps to keep track of selected viewpoints and meshes
+    std::vector<std::vector<int>> true_vp_to_mesh_map(vp_to_mesh_map.size());
+    std::vector<std::vector<int>> true_mesh_to_vp_map(mesh_to_vp_map.size());
 
-	while (vp_to_value_pair.size() > 0 && vp_to_value_pair.front().second != 0)
-	{
-		bool top_val_updated_and_sorted = false;
-		while (!top_val_updated_and_sorted)
-		{
-			// Update top entry 
-			int new_count_val = 0;
-			int current_vp_index = vp_to_value_pair.front().first;
-			for (size_t i = 0; i < vp_to_mesh_map[current_vp_index].size(); i++)
-			{
-				if (mesh_to_vp_map[vp_to_mesh_map[current_vp_index].at(i)].size() < min_view_redundancy_)
-				{
-					new_count_val++;
-				}
-			}
-			vp_to_value_pair.front().second = new_count_val;
+    // Main loop to greedily select viewpoints
+    while (!vp_to_value_pair.empty()) {
+        // Find the largest vp_to_value_pair
+        auto max_it = std::max_element(vp_to_value_pair.begin(), vp_to_value_pair.end(),
+                                    [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+                                        return a.second < b.second;
+                                    });
 
-			// The case where only one value left
-			if (vp_to_value_pair.size() == 1)
-			{
-				top_val_updated_and_sorted = true;
-				break;
-			}
+        // Check if the maximum element's second value is zero
+        if (max_it->second == 0) {
+            break;
+        }
 
-			// Resort top entry in the list
-			bool sorted = false;
-			for (size_t i = 1; i < vp_to_value_pair.size(); i++)
-			{
-				if (vp_to_value_pair[i].second <= vp_to_value_pair.front().second)
-				{
-					if (i == 1)
-					{
-						top_val_updated_and_sorted = true;
-						sorted = true;
-						break;
-					}
-					
-					// Move to i-1 location
-					auto new_pos = vp_to_value_pair.begin() + i - 1;
-					std::rotate(vp_to_value_pair.begin(), vp_to_value_pair.begin() + 1, new_pos);
-					sorted = true;
-				}
-			}
+        // Commit it to vp_keep
+        int top_vp_index = max_it->first;
+        vp_keep[top_vp_index] = true;
 
-			// The case where it is the smallest value
-			if (!sorted)
-			{
-				std::rotate(vp_to_value_pair.begin(), vp_to_value_pair.begin() + 1, vp_to_value_pair.end());
-			}
-		}
-		// RCLCPP_INFO_STREAM_ONCE(this->get_logger(), "High vp index and value after update and resort: " << vp_to_value_pair.front().first << ", " << vp_to_value_pair.front().second);
+        // Add the selected viewpoint and its meshes to the true maps
+        true_vp_to_mesh_map[top_vp_index] = vp_to_mesh_map[top_vp_index];
+        for (const auto& mesh : vp_to_mesh_map[top_vp_index]) {
+            true_mesh_to_vp_map[mesh].push_back(top_vp_index);
+        }
 
-		// Add top entry to list of kept vps, update the mesh to vp map, and remove from pair list
-		int top_vp_index = vp_to_value_pair.front().first;
-		vp_keep[top_vp_index] = true;
-		for (size_t i = 0; i < vp_to_mesh_map[top_vp_index].size(); i++)
-		{
-			mesh_to_vp_map[vp_to_mesh_map[top_vp_index].at(i)].push_back(top_vp_index);
-		}
-		vp_to_value_pair.erase(vp_to_value_pair.begin());
-		count_added++;
-	}
+        // Remove it from vp_to_value_pair
+        vp_to_value_pair.erase(max_it);
 
+
+        // Update vp_to_mesh_map_copy and remove meshes seen by that vp if they meet min_view_redundancy_
+        std::vector<int> meshes_to_remove = vp_to_mesh_map_copy[top_vp_index];
+        for (int mesh : meshes_to_remove) {
+            if (true_mesh_to_vp_map[mesh].size() >= min_view_redundancy_) {
+                for (auto& vp_meshes : vp_to_mesh_map_copy) {
+                    vp_meshes.erase(std::remove(vp_meshes.begin(), vp_meshes.end(), mesh), vp_meshes.end());
+                }
+            }
+        }
+
+        // Reset vp_to_value_pair
+        vp_to_value_pair.clear();
+        for (size_t i = 0; i < vp_to_mesh_map_copy.size(); i++) {
+            if (!vp_keep[i]) {
+                vp_to_value_pair.push_back(std::make_pair(i, vp_to_mesh_map_copy[i].size()));
+            }
+        }
+
+        count_added++;
+    }
+
+    // Replace the original maps with the true maps
+    vp_to_mesh_map = std::move(true_vp_to_mesh_map);
+    mesh_to_vp_map = std::move(true_mesh_to_vp_map);
 
 	RCLCPP_INFO(this->get_logger(), "Finished vp selection");
 	RCLCPP_INFO_STREAM(this->get_logger(), "Number VPs that can't see anything (and kept): " << count_vp_sees_nothing);
@@ -623,6 +728,18 @@ bool InspectionPlanner::mesh_to_greedy_vps()
 		vps_after_trim_->publish(marker_array);	
 	}
 	RCLCPP_INFO_STREAM(this->get_logger(), "Total time to find vps: " << this->now().seconds() - start_time.seconds()); 
+    
+    // check how many meshes can't be seen
+    mesh_not_seen_count = 0;
+    for (size_t j = 0; j < mesh->size(); ++j)
+	{
+        int vp_count = mesh_to_vp_map[j].size();
+        if (vp_count == 0)
+        {
+            mesh_not_seen_count++;
+        }
+	}
+    RCLCPP_WARN(this->get_logger(), "%d Meshes not seen by view points after reduction", mesh_not_seen_count);
 
 	return true;
 }
@@ -764,55 +881,7 @@ bool InspectionPlanner::solve_tsp()
 	// Solve TSP
 	RCLCPP_INFO_STREAM(this->get_logger(), "TSP solver method: " << tsp_method_); 
 	std::vector<int> tsp_index_order;
-	if (tsp_method_ == "greedy")
-	{
-		// tsp_index_order = greedy_tsp_algo(distance, this->get_logger());
-		RCLCPP_ERROR_STREAM(this->get_logger(), tsp_method_ << " has been removed for public release. Please try ortools for the TSP solver");
-		return false;
-	}
-	else if (tsp_method_ == "bnb")
-	{
-		// int source = 0;
-		// std::unique_ptr<TspNode> solution = BranchAndBound(
-		// 	distance, source, tsp_solver_allowed_time_, this->get_logger());
-
-		// if (solution->time < tsp_solver_allowed_time_)
-		// {
-		// 	RCLCPP_INFO_STREAM(this->get_logger(), "Optimal solution found:"); 
-		// 	RCLCPP_INFO_STREAM(this->get_logger(), "Total cost:" << solution->value);
-		// 	RCLCPP_DEBUG_STREAM(this->get_logger(), "Optimal cycle:");
-		// 	for(std::vector<int>::const_iterator it=solution->path->begin();it!=solution->path->end();it++)
-		// 	{
-		// 		tsp_index_order.push_back(*it);
-		// 	}
-		// 	// tsp_index_order.push_back(source);
-		// 	RCLCPP_INFO_STREAM(this->get_logger(), "Elapsed time:"<< solution->time << "s");
-		// }
-		// else
-		// {
-		// 	RCLCPP_INFO_STREAM(this->get_logger(), "Optimal solution NOT found in specified time:"); 
-		// 	RCLCPP_INFO_STREAM(this->get_logger(), "Total cost: " << solution->value);
-		// 	RCLCPP_DEBUG_STREAM(this->get_logger(), "Solution cycle:");
-		// 	for (std::vector<int>::const_iterator it = solution->path->begin(); it != solution->path->end(); it++)
-		// 	{
-		// 		tsp_index_order.push_back(*it);
-		// 	}
-		// 	// tsp_index_order.push_back(source);
-		// 	RCLCPP_INFO_STREAM(this->get_logger(), "Elapsed time:"<< solution->time << "s");
-		// }
-		// delete solution->path;
-		RCLCPP_ERROR_STREAM(this->get_logger(), tsp_method_ << " has been removed for public release. Please try ortools for the TSP solver");
-		return false;
-	}
-	else if (tsp_method_ == "hc")
-	{
-		// unsigned seed = 1;
-		// tsp_index_order = greedy_tsp_algo(distance, this->get_logger());
-		// tsp_index_order = HC(distance, tsp_index_order, tsp_solver_allowed_time_, seed, this->get_logger());
-		RCLCPP_ERROR_STREAM(this->get_logger(), tsp_method_ << " has been removed for public release. Please try ortools for the TSP solver");
-		return false;
-	}
-	else if (tsp_method_ == "ortools")
+	if (tsp_method_ == "ortools")
 	{
 		std::vector<std::vector<int>> distance_int;
 		double double_to_int_scale = 1000;
@@ -827,19 +896,6 @@ bool InspectionPlanner::solve_tsp()
 			}
 		}
 		tsp_index_order = operations_research::Tsp(distance_int, tsp_solver_allowed_time_, this->get_logger());
-	}
-	else if (tsp_method_ == "sa")
-	{
-		// unsigned seed = 1;
-		// tsp_index_order = greedy_tsp_algo(distance, this->get_logger());
-		// // double T = distance[initial[9]][initial[10]]*2*distance.size();
-		// // double T = .8;
-		// double T = 100;
-		// double T_min = 0.1 * distance.size();
-		// double r = 0.99;
-		// tsp_index_order = SA(distance, tsp_index_order, T, T_min, r, tsp_solver_allowed_time_, seed, this->get_logger());
-		RCLCPP_ERROR_STREAM(this->get_logger(), tsp_method_ << " has been removed for public release. Please try ortools for the TSP solver");
-		return false;
 	}
 	else
 	{
@@ -957,6 +1013,7 @@ void InspectionPlanner::plan()
 		return;
 	}
 
+
 	// Process VPs to graph or directly optimize
 	// Find path between vps
 	RCLCPP_INFO(this->get_logger(), "**Solving for flight path**");
@@ -976,6 +1033,10 @@ void InspectionPlanner::plan()
 		prev_vp_pos = cur_vp_pos;
 	}
 	RCLCPP_INFO_STREAM(this->get_logger(), "Final path length: " << path_length);
+    if (path_length > 999999)
+    {
+        RCLCPP_WARN(this->get_logger(), "!Path has collision with object! A possible solution is to increase time to solve.");
+    }
 	
 	RCLCPP_WARN(this->get_logger(), "Finished making plan!");
 	RCLCPP_INFO_STREAM(this->get_logger(), "Total Time: " << this->now().seconds() - start_time.seconds()); 

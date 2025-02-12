@@ -20,6 +20,10 @@ struct Triangle {
     std::array<Eigen::Vector3f, 3> vertices;
 };
 
+bool ray_intersects_triangle(const Eigen::Vector3f& ray_origin, const Eigen::Vector3f& ray_direction, const Triangle& triangle);
+bool is_point_inside_mesh(const Eigen::Vector3f& rayOrigin, const Eigen::Vector3f& rayDirection, const std::vector<Triangle>& mesh);
+bool segment_intersects_triangle(const Eigen::Vector3f& P0, const Eigen::Vector3f& P1, const Triangle& triangle);
+
 std::unique_ptr<std::vector<Triangle>> readSTLfile(std::string name, rclcpp::Logger logger_);
 
 Eigen::Vector3f calculate_surface_normal(const Eigen::Vector3f& v0, const Eigen::Vector3f& v1, const Eigen::Vector3f& v2);
@@ -57,11 +61,5 @@ float point_to_triangle_distance(const Eigen::Vector3f& point, const mesh_utils:
 float closest_distance_between_segments(
     const Eigen::Vector3f& a0, const Eigen::Vector3f& a1,
     const Eigen::Vector3f& b0, const Eigen::Vector3f& b1);
-
-float closest_distance_between_segments(
-    const Eigen::Vector3f& a0, const Eigen::Vector3f& a1,
-    const Eigen::Vector3f& b0, const Eigen::Vector3f& b1,
-    bool clampAll, bool clampA0, bool clampA1,
-    bool clampB0, bool clampB1);
 
 }

@@ -3,6 +3,108 @@
 namespace mesh_utils
 {
 
+// from ChatGPT
+bool ray_intersects_triangle(const Eigen::Vector3f& ray_origin, const Eigen::Vector3f& ray_direction, const Triangle& triangle) {   
+    //Möller–Trumbore intersection algorithm
+    const float EPSILON = 1e-8f;
+    Eigen::Vector3f V0 = triangle.vertices[0];
+    Eigen::Vector3f V1 = triangle.vertices[1];
+    Eigen::Vector3f V2 = triangle.vertices[2];
+    Eigen::Vector3f E1 = V1 - V0;
+    Eigen::Vector3f E2 = V2 - V0;
+    Eigen::Vector3f P = ray_direction.cross(E2);
+    float det = E1.dot(P);
+
+    if (fabs(det) < EPSILON) {
+        return false; // Ray is parallel to the triangle plane
+    }
+
+    float invDet = 1.0f / det;
+    Eigen::Vector3f T = ray_origin - V0;
+    float u = T.dot(P) * invDet;
+
+    if ((u < 0 && abs(u) > EPSILON) || (u > 1 && abs(u-1) > EPSILON))
+    {
+        return false;  
+    }    
+
+    Eigen::Vector3f Q = T.cross(E1);
+    float v = ray_direction.dot(Q) * invDet;
+
+    if ((v < 0 && abs(v) > EPSILON) || (u + v > 1 && abs(u + v - 1) > EPSILON))
+    {
+        return false;
+    }
+
+    float t = E2.dot(Q) * invDet;
+
+    return t > EPSILON; // Intersection is valid if t > 0
+}
+
+// from ChatGPT 
+bool is_point_inside_mesh(const Eigen::Vector3f& rayOrigin, const Eigen::Vector3f& rayDirection, const std::vector<Triangle>& mesh) {
+    int intersectionCount = 0;
+
+    for (const auto& triangle : mesh) {
+        if (ray_intersects_triangle(rayOrigin, rayDirection, triangle)) {
+            intersectionCount++;
+        }
+    }
+
+    return intersectionCount % 2 == 1;
+}
+
+bool segment_intersects_triangle(const Eigen::Vector3f& P0, const Eigen::Vector3f& P1, const Triangle& triangle) {
+    const float EPSILON = 1e-8f;
+    Eigen::Vector3f V0 = triangle.vertices[0];
+    Eigen::Vector3f V1 = triangle.vertices[1];
+    Eigen::Vector3f V2 = triangle.vertices[2];
+    Eigen::Vector3f E1 = V1 - V0;
+    Eigen::Vector3f E2 = V2 - V0;
+    Eigen::Vector3f D = P1 - P0;
+    Eigen::Vector3f P = D.cross(E2);
+    float det = E1.dot(P);
+
+    if (fabs(det) < EPSILON) {
+        return false; // Segment is parallel to the triangle plane
+    }
+
+    float invDet = 1.0f / det;
+    Eigen::Vector3f T = P0 - V0;
+    float u = T.dot(P) * invDet;
+
+    if ((u < 0 && abs(u) > EPSILON) || (u > 1 && abs(u-1) > EPSILON))
+    {
+        return false;  
+    }    
+
+    Eigen::Vector3f Q = T.cross(E1);
+    float v = D.dot(Q) * invDet;
+
+    if ((v < 0 && abs(v) > EPSILON) || (u + v > 1 && abs(u + v - 1) > EPSILON))
+    {
+        return false;
+    }
+
+    float t = E2.dot(Q) * invDet;
+
+    if (t < 0 || t > 0.9999) {
+        return false; // Intersection point is not within the segment
+    }
+
+    // Calculate the intersection point
+    Eigen::Vector3f intersectionPoint = P0 + t * D;
+
+    // Check if the intersection point is at any of the triangle's vertices
+    if ((intersectionPoint - V0).norm() < EPSILON ||
+        (intersectionPoint - V1).norm() < EPSILON ||
+        (intersectionPoint - V2).norm() < EPSILON) {
+        return false; // Intersection point is at a vertex
+    }
+    // RCLCPP_INFO(logger_, "segment ray is blocked with: %f length %f u %f v %f", t, u, v);
+    return true;
+}
+
 // From ATL inspection stack with modifications
 std::unique_ptr<std::vector<Triangle>> readSTLfile(std::string name, rclcpp::Logger logger_)
 {
@@ -216,13 +318,20 @@ bool ray_views_point(const Eigen::Vector3f& vp_pose,
 	}
 
 	// point within incendent angle from surface normal
-	if (angle_between_vectors(surface_normal, -ray_direction) > max_incidence_angle)
-	{
-		return false;
+    Eigen::Vector3f neg_ray_direction = ray_direction*-1;
+	if (angle_between_vectors(surface_normal, neg_ray_direction) > max_incidence_angle)
+	{     
+        // point within incendent angle from surface normal
+        Eigen::Vector3f neg_surface_normal = surface_normal*-1;
+        if (angle_between_vectors(neg_surface_normal, neg_ray_direction) > max_incidence_angle)
+        {
+            return false;
+        }
 	}
 
 	// Checks Max distance
-	if ((vp_pose-point).norm() > max_view_distance)
+    Eigen::Vector3f dist = vp_pose-point;
+	if ((dist).norm() > max_view_distance)
 	{
 		return false;
 	}
@@ -285,147 +394,50 @@ float point_to_triangle_distance(const Eigen::Vector3f& point, const mesh_utils:
     return (closest_point - point).norm();
 }
 
-// Overloaded function with default arguments
+// taken from ChatGPT
 float closest_distance_between_segments(
     const Eigen::Vector3f& a0, const Eigen::Vector3f& a1,
-    const Eigen::Vector3f& b0, const Eigen::Vector3f& b1) {
-    return closest_distance_between_segments(a0, a1, b0, b1, true, false, false, false, false);
-}
-
-// From https://stackoverflow.com/questions/2824478/shortest-distance-between-two-line-segments
-float closest_distance_between_segments(
-    const Eigen::Vector3f& a0, const Eigen::Vector3f& a1,
-    const Eigen::Vector3f& b0, const Eigen::Vector3f& b1,
-    bool clampAll = true, bool clampA0 = false, bool clampA1 = false,
-    bool clampB0 = false, bool clampB1 = false)
+    const Eigen::Vector3f& b0, const Eigen::Vector3f& b1)
 {
-    // If clampAll is true, set all clamps to true
-    if (clampAll)
-    {
-        clampA0 = true;
-        clampA1 = true;
-        clampB0 = true;
-        clampB1 = true;
-    }
-
     // Calculate vectors and their magnitudes
     Eigen::Vector3f A = a1 - a0;
     Eigen::Vector3f B = b1 - b0;
-    float magA = A.norm();
-    float magB = B.norm();
+    Eigen::Vector3f r = a0 - b0;
+    float a = A.dot(A); // Squared length of segment A
+    float e = B.dot(B); // Squared length of segment B
+    float f = B.dot(r);
 
-    Eigen::Vector3f _A = A / magA;
-    Eigen::Vector3f _B = B / magB;
+    float s, t;
+    float c = A.dot(r);
+    float b = A.dot(B);
+    float denom = a * e - b * b;
 
-    Eigen::Vector3f cross = _A.cross(_B);
-    float denom = cross.squaredNorm();
+    // If segments are not parallel, compute the closest points
+    if (denom != 0.0f) {
+        s = (b * f - c * e) / denom;
+        t = (a * f - b * c) / denom;
 
-    // Define a small epsilon for floating-point comparison
-    const float epsilon = 1e-6;
-
-    // If lines are parallel (denom is close to 0), test if lines overlap
-    if (denom < epsilon)
-    {
-        float d0 = _A.dot(b0 - a0);
-
-        // Overlap only possible with clamping
-        if (clampA0 || clampA1 || clampB0 || clampB1)
-        {
-            float d1 = _A.dot(b1 - a0);
-
-            // Is segment B before A?
-            if (d0 <= 0 && d1 <= 0)
-            {
-                if (clampA0 && clampB1)
-                {
-                    if (std::abs(d0) < std::abs(d1))
-                    {
-                        return (a0 - b0).norm();
-                    }
-                    return (a0 - b1).norm();
-                }
-            }
-            // Is segment B after A?
-            else if (d0 >= magA && d1 >= magA)
-            {
-                if (clampA1 && clampB0) 
-                {
-                    if (std::abs(d0) < std::abs(d1))
-                    {
-                        return (a1 - b0).norm();
-                    }
-                    return (a1 - b1).norm();
-                }
-            }
-        }
-        // Segments overlap, return distance between parallel segments
-        return ((d0 * _A) + a0 - b0).norm();
+        // Clamp s to [0, 1]
+        s = std::max(0.0f, std::min(1.0f, s));
+    } else {
+        // If segments are parallel, choose arbitrary s
+        s = 0.0f;
     }
 
-    // Lines criss-cross: Calculate the projected closest points
-    Eigen::Vector3f t = b0 - a0;
-    float detA = t.dot(_B.cross(cross));
-    float detB = t.dot(_A.cross(cross));
+    // Compute the point on A closest to B
+    Eigen::Vector3f c1 = a0 + s * A;
 
-    float t0 = detA / denom;
-    float t1 = detB / denom;
+    // Compute the point on B closest to A
+    t = (b * s + f) / e;
 
-    Eigen::Vector3f pA = a0 + (_A * t0); // Projected closest point on segment A
-    Eigen::Vector3f pB = b0 + (_B * t1); // Projected closest point on segment B
+    // Clamp t to [0, 1]
+    t = std::max(0.0f, std::min(1.0f, t));
 
-    // Clamp projections
-    if (clampA0 || clampA1 || clampB0 || clampB1)
-    {
-        if (clampA0 && t0 < 0)
-        {
-            pA = a0;
-        }
-        else if (clampA1 && t0 > magA)
-        {
-            pA = a1;
-        }
+    // Compute the point on B closest to A
+    Eigen::Vector3f c2 = b0 + t * B;
 
-        if (clampB0 && t1 < 0)
-        {
-            pB = b0;
-        }
-        else if (clampB1 && t1 > magB)
-        {
-            pB = b1;
-        }
-
-        // Clamp projection A
-        if ((clampA0 && t0 < 0) || (clampA1 && t0 > magA))
-        {
-            float dot = _B.dot(pA - b0);
-            if (clampB0 && dot < 0)
-            {
-                dot = 0;
-            }
-            else if (clampB1 && dot > magB)
-            {
-                dot = magB;
-            }
-            pB = b0 + (_B * dot);
-        }
-
-        // Clamp projection B
-        if ((clampB0 && t1 < 0) || (clampB1 && t1 > magB))
-        {
-            float dot = _A.dot(pB - a0);
-            if (clampA0 && dot < 0)
-            {
-                dot = 0;
-            }
-            else if (clampA1 && dot > magA)
-            {
-                dot = magA;
-            }
-            pA = a0 + (_A * dot);
-        }
-    }
-
-    return (pA - pB).norm();
+    // Return the distance between the closest points
+    return (c1 - c2).norm();
 }
 
 }
